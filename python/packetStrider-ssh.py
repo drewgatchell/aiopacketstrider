@@ -7,12 +7,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pyshark
 import time
+import asyncio
 
 __author__ = 'Ben Reardon'
 __contact__ = 'benjeems@gmail.com @benreardon'
 __version__ = '0.1'
 __license__ = 'GNU General Public License v3.0'
 
+PACKETS = []
 
 def parse_command_args():
     """Parse command line arguments"""
@@ -47,7 +49,7 @@ def parse_command_args():
     return parser.parse_args()
 
 
-def construct_matrix(pcap):
+async def construct_matrix(pcap):
     """Returns a matrix containing packet of index, stream and size
        Each packet has a row in the matrix"""
     matrix = []
@@ -69,7 +71,7 @@ def construct_matrix(pcap):
     return matrix
 
 
-def find_meta_size(pcap, num_packets, stream):
+async def find_meta_size(pcap, num_packets, stream):
     """Finds the sizes of "tell" packets which appear just after New keys packet
     These relate the size for reverse and forward keystrokes and login prompt"""
     meta_size = [stream, 0, 0, 0, 0, 0]
@@ -104,7 +106,7 @@ def find_meta_size(pcap, num_packets, stream):
     return meta_size
 
 
-def find_meta_hassh(pcap, num_packets, stream):
+async def find_meta_hassh(pcap, num_packets, stream):
     """Finds the hassh parameters of each stream"""
     protocol_client = 'not contained in pcap'
     protocol_server = 'not contained in pcap'
@@ -205,6 +207,7 @@ def analyze(matrix, meta_size, pcap, window, stride, do_direction, do_windowing_
     # only do the rest of the analysis if we have metadata.
     if meta_size[1] != 0:
         if do_direction == 'forward':
+            # TODO: This can probably be ASYNC
             print('   ... Scanning for Forward login attempts')
             results_f_logins, fwd_logged_in_at_packet = scan_for_forward_login_attempts(matrix, meta_size, pcap)
             print('   ... Scanning for Forward key accepts')
@@ -1256,20 +1259,23 @@ def pretty_print(results):
     print('\u2503')
 
 
-def get_streams(fullpcap):
+def process_packet(packet):
+    PACKETS.append(packet)
+
+
+def get_streams(packets):
     """ Walks through fullpcap and makes a list (streams) of streams within
     """
     streams = []
-    for packet in fullpcap:
+    for packet in packets:
         stream = int(packet.tcp.stream)
         if stream not in streams:
             print('    ...found stream {}'.format(stream))
             streams.append(stream)
-    fullpcap.close()
     return streams
 
 
-def main():
+async def main(eventloop):
     """packetStrider-ssh is a packet forensics tool for SSH.
    It creates a rich feature set from packet metadata such SSH Protocol message content, direction, size, latency and sequencing.
    It performs pattern matching on these features, using statistical analysis, and sliding windows to predict session initiation,
@@ -1304,7 +1310,7 @@ def main():
             string = 'ssh && !tcp.analysis.spurious_retransmission && !tcp.analysis.retransmission && !tcp.analysis.fast_retransmission && tcp.stream==' + str(
                 only_stream)
             try:
-                fullpcap = pyshark.FileCapture(file, display_filter=string)
+                fullpcap = pyshark.FileCapture(file, display_filter=string, eventloop=eventloop)
                 # TODO is this needed at all ? This was a test access to the data, to ensure that an exception occurs if the data is empty
                 # fullpcap[0]
                 streams = [only_stream]
@@ -1315,28 +1321,34 @@ def main():
         else:
             fullpcap = pyshark.FileCapture(file, display_filter='ssh && !tcp.analysis.spurious_retransmission && \
                                                                 !tcp.analysis.retransmission && \
-                                                                !tcp.analysis.fast_retransmission')
+                                                                !tcp.analysis.fast_retransmission', eventloop=eventloop)
             print('... Getting streams from pcap:')
-            streams = get_streams(fullpcap)
+            await fullpcap.packets_from_tshark(process_packet)
+            streams = get_streams(PACKETS)
 
         for stream in streams:
-            string = 'ssh && !tcp.analysis.spurious_retransmission && !tcp.analysis.retransmission && !tcp.analysis.fast_retransmission && tcp.stream== ' + str(
-                stream)
+            string = f'ssh && !tcp.analysis.spurious_retransmission && !tcp.analysis.retransmission && ' \
+                     f'!tcp.analysis.fast_retransmission && tcp.stream=={stream}'
             try:
+                stream_packets = []
+
+                def process_stream_packets(packet):
+                    stream_packets.append(packet)
+
                 print('... Loading stream {}'.format(stream))
-                pcap = pyshark.FileCapture(file, display_filter=string)
-                pcap.load_packets()
-                num_packets = len(pcap)
+                pcap = pyshark.FileCapture(file, display_filter=string, eventloop=eventloop)
+                await pcap.packets_from_tshark(process_stream_packets)
+                num_packets = len(stream_packets)
                 if num_packets > 10:
 
                     print('... Finding meta')
-                    meta_size = find_meta_size(pcap, num_packets, stream)
+                    meta_size = await find_meta_size(stream_packets, num_packets, stream)
                     df_meta_size = pd.DataFrame([meta_size], columns=[
                         'stream', 'Reverse keystoke size', 'size_newkeys_next', 'size_newkeys_next2',
                         'size_newkeys_next3', 'size_login_prompt'])
 
                     print('... Finding hassh elements')
-                    meta_hassh = find_meta_hassh(pcap, num_packets, stream)
+                    meta_hassh = await find_meta_hassh(stream_packets, num_packets, stream)
                     df_meta_hassh = pd.DataFrame([meta_hassh], columns=[
                         'stream', 'Client Proto', 'hassh', 'Server Proto', 'hassh_server',
                         'sip', 'sport', 'dip', 'dport'])
@@ -1353,12 +1365,12 @@ def main():
                     else:
                         print('... Building size matrix')
                         # Note this returns the raw, unordered matrix
-                        matrix = construct_matrix(pcap)
+                        matrix = await construct_matrix(stream_packets)
                         # Note the matrix is reordered inside the anaylze function to account for any of order
                         # keystroke packets Hence appearing on both side of the function call
-                        results, window_matrix, matrix = analyze(matrix, meta_size, pcap, window, stride, do_direction,
+                        results, window_matrix, matrix = analyze(matrix, meta_size, stream_packets, window, stride, do_direction,
                                                                  do_windowing_and_plots, keystrokes)
-                    time_first_packet = float(pcap[0].sniff_timestamp)
+                    time_first_packet = float(stream_packets[0].sniff_timestamp)
                     time_first_packet_gmt = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(time_first_packet))
                     pcap.close()
                     report(results, file, matrix, window_matrix, window, stride, output_dir, df_stream_meta,
@@ -1371,4 +1383,9 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    start_time = time.time()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main(loop))
+    #main()
+    end_time = time.time()
+    print(f"Total Time: {end_time-start_time}")
