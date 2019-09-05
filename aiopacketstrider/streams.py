@@ -40,9 +40,11 @@ async def stream_processor(
         pcap = FileCapture(file, display_filter=string, eventloop=eventloop)
         await pcap.packets_from_tshark(process_stream_packets)
         num_packets = len(stream_packets)
-        if num_packets > 10:
+        if num_packets > 10: # TODO: Rotate this around so that we quit if there are less than 10 packets in a stream
 
             print("... Finding meta")
+
+            # TODO: Consolidate this into one function that returns df_meta_size
             meta_size: MetaSize = await metadata.find_meta_size(
                 stream_packets, num_packets, stream
             )
@@ -59,6 +61,7 @@ async def stream_processor(
             )
 
             print("... Finding hassh elements")
+            # TODO: Consolidate this to one function that returns df_meta_hassh
             meta_hassh: MetaHASSH = await metadata.find_meta_hassh(
                 stream_packets, num_packets, stream
             )
@@ -84,7 +87,7 @@ async def stream_processor(
             else:
                 df_stream_meta = []
 
-            if meta_only:
+            if meta_only:  # TODO: If Meta Only perhaps we can just jump straight to reporting?
                 matrix = []
                 window_matrix = []
                 results = []

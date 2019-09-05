@@ -24,6 +24,7 @@ async def construct_matrix(pcap: List[Packet]) -> List[int]:
             length = -length
         # Update the matrix with details
         matrix = matrix + [length]
+        # This basically looks like [30, 100, 150]
         index = index + 1
 
     return matrix

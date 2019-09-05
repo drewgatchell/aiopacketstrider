@@ -97,6 +97,7 @@ async def main(eventloop: asyncio.AbstractEventLoop):
             print("no output directory")
 
         print(f"\n... Loading full pcap : {file}")
+        # Doing Analysis on a Specific Stream; Can probably move this Logic to StreamProcessor
         if only_stream >= 0:
             string = (
                 f"ssh && !tcp.analysis.spurious_retransmission && !tcp.analysis.retransmission && "
@@ -109,6 +110,8 @@ async def main(eventloop: asyncio.AbstractEventLoop):
                 print(f"There is no stream {only_stream} in {file}, try another")
                 stream_list = []
                 await fullpcap.close_async()
+
+        # Do analysis on whole PCAP
         else:
             fullpcap = FileCapture(
                 file,
